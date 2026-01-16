@@ -1,5 +1,6 @@
 
 export { SalesAgent } from "./salesAgentDO";
+export { FinalizeCallWorkflow } from "./workflow";
 
 export interface Env {
 	AI: any; // Workers AI binding
