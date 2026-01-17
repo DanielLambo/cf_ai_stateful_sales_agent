@@ -7,7 +7,7 @@ type Final = {
     followupEmail: string;
 };
 
-// Reuse robust JSON extraction helper
+// Helper: Robust JSON extraction
 function normalizeAIText(output: any): string {
     if (!output) return "";
     if (typeof output === "string") return output;
@@ -42,6 +42,7 @@ export class FinalizeCallWorkflow extends WorkflowEntrypoint<Env, { sessionId: s
         const stateResp = await stub.fetch("https://do/internal/state");
         const s = await stateResp.json<any>();
 
+        // We use the same model version as the agent for consistency
         const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
         const convo = (s.messages ?? [])
             .map((m: any) => `${m.role.toUpperCase()}: ${m.content}`)
@@ -114,7 +115,7 @@ Return ONLY plain text. No subject line.
             followupEmail,
         };
 
-        // Save final output back into Durable Object
+        // Persist final report to the session state
         await stub.fetch("https://do/internal/save-final", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

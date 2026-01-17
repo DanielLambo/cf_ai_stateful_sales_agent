@@ -79,6 +79,45 @@ function extractJsonObject(text: string): string | null {
     return text.slice(start, end + 1);
 }
 
+function parseSalesResponse(text: string): { reply: string; followUps: string[] } {
+    let replyMatch = extractBetween(text, "<REPLY>", "</REPLY>");
+
+    // Fix: If no <REPLY> start tag, but </REPLY> exists, try to take everything before </REPLY>
+    if (!replyMatch && text.includes("</REPLY>")) {
+        const split = text.split("</REPLY>");
+        if (split.length > 0) {
+            replyMatch = split[0].trim();
+        }
+    }
+
+    // Extract follow-ups using regex
+    const f1 = text.match(/FOLLOW_UP_1:\s*(.+)/);
+    const f2 = text.match(/FOLLOW_UP_2:\s*(.+)/);
+
+    const followUps: string[] = [];
+    if (f1 && f1[1]) followUps.push(f1[1].trim());
+    if (f2 && f2[1]) followUps.push(f2[1].trim());
+
+    // Fallback: if no tags, use the whole text as reply (clean up a bit)
+    let reply = replyMatch ?? text;
+
+    // cleanup any leaked tags if they survived
+    reply = reply.replace(/<\/REPLY>/g, "").replace(/<REPLY>/g, "").trim();
+
+    // Safety fallback for empty reply
+    if (!reply.trim()) {
+        reply = "I'm listening—could you say more about that?";
+    }
+
+    // Safety fallback for empty follow-ups
+    if (followUps.length === 0) {
+        followUps.push("Can you elaborate?");
+        followUps.push("Is there anything else?");
+    }
+
+    return { reply, followUps: followUps.slice(0, 2) };
+}
+
 // Durable Object Class
 
 export class SalesAgent extends DurableObject {
@@ -110,7 +149,7 @@ export class SalesAgent extends DurableObject {
     async fetch(request: Request): Promise<Response> {
         const url = new URL(request.url);
 
-        // --- /internal/chat ---
+        // --- Internal Chat Handler ---
         if (url.pathname === "/internal/chat" && request.method === "POST") {
             try {
                 const { message } = await request.json<{ message: string }>();
@@ -124,28 +163,41 @@ export class SalesAgent extends DurableObject {
                 const recent = lastN(s.messages, 10);
                 const recentText = recent.map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n");
 
-                // 3. System Prompt (Enforce <json> tags)
+                // 3. System Prompt (Sales Coach - Differentiated Responses)
                 const systemPrompt = `
-You are a sales objection coach. Your job is to help a sales rep respond to a customer message.
-Response format:
-<json>
-{
-  "reply": "string (2-4 sentences)",
-  "followUps": ["question 1", "question 2"]
-}
-</json>
+You are an expert Sales Objection Coach.
+Your goal is to help a rep respond to a customer's specific objection.
 
-Be practical, confident, and specific. No markdown outside tags.
+GUIDELINES:
+- **Price Objection**: Acknowledge budget, pivot to value/ROI, or ask about specific expectations. Don't just verify the price.
+- **Competitor Objection**: Differentiate on reliability, premium features, or service. Don't bash the competitor.
+- **Service Complaint**: Apologize sincerely, validate feelings, propose immediate resolution.
+- **"Just looking"**: Qualify their timeline or specific interest.
+
+GUARDRAILS:
+- You must NOT answer questions that violate CFPB (Consumer Financial Protection Bureau), FDIC, or retail organization rules. 
+- If asked about illegal financial structuring, exact compliance limits for evasion, or specific internal banking regulation loopholes, politely decline.
+- State that you are an AI sales coach and cannot provide legal or regulatory compliance advice.
+- IF users send prompts that are not related to sales (e.g. taxes, cooking, general life), respond with "I'm sorry, I can only help with sales-related questions."
+
+FORMAT (Strict):
+<REPLY>
+(Your suggested natural language response, 2-4 sentences max)
+</REPLY>
+FOLLOW_UP_1: (Strategic question to advance the deal)
+FOLLOW_UP_2: (Alternative probing question)
+
+Do NOT return JSON for the reply. Use the tags above.
 `.trim();
 
                 const userPrompt = `
-Rolling summary: ${s.rollingSummary || "(none yet)"}
-Deal Memory: ${JSON.stringify(s.dealMemory)}
+Rolling Summary: ${s.rollingSummary || "(none yet)"}
+Deal Data: ${JSON.stringify(s.dealMemory)}
 
-Recent conversation:
+Conversation:
 ${recentText}
 
-Now respond to the latest USER message.
+Respond to the latest USER message.
 `.trim();
 
                 // 4. Run LLM
@@ -157,23 +209,11 @@ Now respond to the latest USER message.
                     ],
                 });
 
-                // 5. Safe Parse
+                // 5. Parse Natural Language Output
                 let rawText = normalizeAIText(aiResp);
-                let jsonStr = extractBetween(rawText, "<json>", "</json>") ?? extractJsonObject(rawText);
-                let parsed = safeJsonParse<{ reply: string; followUps: string[] }>(jsonStr || "");
+                const parsed = parseSalesResponse(rawText);
 
-                // Fallback attempt: if parsing failed, try to treat rawText as just the reply if it doesn't look like JSON
-                if (!parsed && !rawText.trim().startsWith("{")) {
-                    // The model might have just refused and chatted
-                    parsed = { reply: rawText, followUps: [] };
-                }
-
-                const reply = parsed?.reply ?? "I can help—can you tell me what price point you were expecting?";
-                const followUps = parsed?.followUps?.length === 2
-                    ? parsed.followUps
-                    : ["What's driving that concern?", "What would make this a clear yes for you?"];
-
-                // 6. Periodic Memory Update (Every 3 turns)
+                // 6. Asynchronous Memory Update (Every 3 turns)
                 if (s.userTurnCount > 0 && s.userTurnCount % 3 === 0) {
                     const memSystem = `
 Extract Deal Memory. Output strictly valid JSON inside <json> tags.
@@ -216,13 +256,20 @@ ${recentText}
                     }
                 }
 
-                // 7. Save & Return
-                s.messages.push({ role: "assistant", content: reply });
+                // 7. Update State & Persist
+                s.messages.push({ role: "assistant", content: parsed.reply });
+
+                // Enforce sliding window on message history to prevent unbounded growth.
+                // We keep the last 40 messages which is sufficient for context window.
+                if (s.messages.length > 40) {
+                    s.messages = s.messages.slice(-40);
+                }
+
                 await this.save(s);
 
                 return Response.json({
-                    reply,
-                    followUps,
+                    reply: parsed.reply,
+                    followUps: parsed.followUps,
                     dealMemory: s.dealMemory,
                     rollingSummary: s.rollingSummary,
                     userTurnCount: s.userTurnCount,
