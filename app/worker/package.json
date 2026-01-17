@@ -1,5 +1,5 @@
 {
-  "name": "cloudflare-workers-openapi",
+  "name": "cf_ai_sales_coach-worker",
   "version": "0.0.1",
   "private": true,
   "scripts": {
