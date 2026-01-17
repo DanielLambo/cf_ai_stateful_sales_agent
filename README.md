@@ -143,14 +143,22 @@ I learned to build this entire architecture using **Cloudflare documentation and
 
 ---
 
-## Running Locally
+## Running locally
 
-```bash
-# worker
+### 1) Start the Worker (API + Durable Objects + Workflows)
 cd app/worker
+npm install
 npm run dev
+# Worker runs on http://localhost:8787
 
-# frontend
-cd app/web
+### 2) Start the Pages UI (chat frontend)
+cd ../web
+npm install
 npm run dev
-```
+# UI runs on the printed localhost URL (ex: http://localhost:5173)
+
+### 3) Try it
+- Type an objection (pricing, competitor, customer service)
+- Click "End Call" to trigger the Workflow
+- View generated summary/action items/email
+
